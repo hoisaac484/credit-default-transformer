@@ -1,0 +1,15 @@
+{
+  "val_acc": 0.8173333333333334,
+  "val_auroc": 0.7872160731968971,
+  "test_acc": 0.815,
+  "test_auroc": 0.7635712722928611,
+  "best_cv_auroc": 0.7821954939262514,
+  "best_params": {
+    "n_estimators": "200",
+    "min_samples_split": "10",
+    "min_samples_leaf": "2",
+    "max_features": "log2",
+    "max_depth": "10",
+    "class_weight": "None"
+  }
+}
