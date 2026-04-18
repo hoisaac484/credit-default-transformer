@@ -1,9 +1,11 @@
 """
 Visualisation utilities for the report:
   1. Attention heatmaps (which tokens attend to which)
-  2. Training curves (loss, AUROC)
+  2. Training curves (loss, AUROC) — default and tuned transformer
   3. EDA plots (class balance, correlation, distributions)
-  4. Model comparison table/bar chart
+  4. Model comparison table/bar chart — THREE models:
+       Default Transformer, Tuned Transformer, Random Forest
+  5. ROC and Precision-Recall curves — all three models
 
 Run:
     python visualise.py --mode all
@@ -11,6 +13,7 @@ Run:
     python visualise.py --mode attention
     python visualise.py --mode curves
     python visualise.py --mode compare
+    python visualise.py --mode roc_pr
 """
 
 import argparse
@@ -119,8 +122,8 @@ def plot_eda():
 
 # ── 2. Attention heatmaps ──────────────────────────────────────────────────────
 
-def plot_attention(model_path="outputs/transformer_best.pt",
-                   d_model=64, n_heads=4, n_layers=2, d_ff=128, month_dim=5):
+def plot_attention(model_path="outputs/transformer_best_tuned.pt",
+                   d_model=128, n_heads=8, n_layers=3, d_ff=128, month_dim=5):
     device = torch.device("cpu")
 
     model = TemporalTransformer(d_model=d_model, n_heads=n_heads,
@@ -138,11 +141,11 @@ def plot_attention(model_path="outputs/transformer_best.pt",
         for demo, monthly, _ in test_loader:
             _, attn_maps = model(demo, monthly)
             for layer_idx, attn in enumerate(attn_maps):
-                all_attn[layer_idx].append(attn.numpy())  # (B, H, 7, 7)
+                all_attn[layer_idx].append(attn.numpy())
 
     for layer_idx in range(n_layers):
-        attn_avg = np.concatenate(all_attn[layer_idx], axis=0).mean(axis=0)  # (H, 7, 7)
-        attn_mean_heads = attn_avg.mean(axis=0)  # (7, 7)
+        attn_avg = np.concatenate(all_attn[layer_idx], axis=0).mean(axis=0)  # (H, 8, 8)
+        attn_mean_heads = attn_avg.mean(axis=0)  # (8, 8)
 
         fig, axes = plt.subplots(1, n_heads + 1, figsize=(4 * (n_heads + 1), 4))
 
@@ -171,11 +174,11 @@ def plot_attention(model_path="outputs/transformer_best.pt",
         plt.close()
         print(f"Saved {path}")
 
-        # Row-0 attention: what does the CLS (demo) token attend to?
+        # CLS token attention
         fig, ax = plt.subplots(figsize=(7, 2.5))
-        cls_attn = attn_mean_heads[0]  # query = Token 0 (demo), attending to all 7 tokens
+        cls_attn = attn_mean_heads[0]
         ax.bar(TOKEN_LABELS, cls_attn, color="#7b68ee", edgecolor="white")
-        ax.set_title(f"Layer {layer_idx + 1}: Demographics token attention over months")
+        ax.set_title(f"Layer {layer_idx + 1}: CLS token attention over all tokens")
         ax.set_ylabel("Attention weight")
         ax.set_ylim(0, cls_attn.max() * 1.25)
         for i, v in enumerate(cls_attn):
@@ -187,101 +190,159 @@ def plot_attention(model_path="outputs/transformer_best.pt",
         print(f"Saved {path}")
 
 
-# ── 3. Training curves ─────────────────────────────────────────────────────────
+# ── 3. Training curves — default AND tuned ─────────────────────────────────────
 
-def plot_curves(history_path="outputs/transformer_history.json"):
-    with open(history_path) as f:
-        history = json.load(f)
+def plot_curves():
+    """
+    Plots training curves for both default and tuned transformer.
+    Saves separate figures and one combined AUROC comparison.
+    """
+    histories = {}
 
-    epochs = range(1, len(history["train_loss"]) + 1)
+    for label, path in [
+        ("Default",  "outputs/transformer_history_default.json"),
+        ("Tuned",    "outputs/transformer_history_tuned.json"),
+    ]:
+        if os.path.exists(path):
+            with open(path) as f:
+                histories[label] = json.load(f)
+        else:
+            print(f"Warning: {path} not found — skipping {label}")
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    if not histories:
+        print("No transformer history files found.")
+        return
 
-    ax1.plot(epochs, history["train_loss"], label="Train loss", color="#4c9be8")
-    ax1.plot(epochs, history["val_loss"],   label="Val loss",   color="#e8754c")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("BCE Loss")
-    ax1.set_title("Training & Validation Loss")
-    ax1.legend()
-    ax1.grid(alpha=0.3)
+    # Individual curves per model
+    for label, history in histories.items():
+        epochs = range(1, len(history["train_loss"]) + 1)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
-    ax2.plot(epochs, history["val_auroc"], label="Val AUROC", color="#50c8a0")
-    ax2.axhline(y=max(history["val_auroc"]), color="grey",
-                linestyle="--", alpha=0.6,
-                label=f"Best: {max(history['val_auroc']):.4f}")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("AUROC")
-    ax2.set_title("Validation AUROC")
-    ax2.legend()
-    ax2.grid(alpha=0.3)
+        ax1.plot(epochs, history["train_loss"], label="Train loss", color="#4c9be8")
+        ax1.plot(epochs, history["val_loss"],   label="Val loss",   color="#e8754c")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("BCE Loss")
+        ax1.set_title(f"{label} Transformer — Training & Validation Loss")
+        ax1.legend()
+        ax1.grid(alpha=0.3)
 
-    plt.tight_layout()
-    path = "outputs/figures/training_curves.png"
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"Saved {path}")
+        ax2.plot(epochs, history["val_auroc"], label="Val AUROC", color="#50c8a0")
+        ax2.axhline(y=max(history["val_auroc"]), color="grey",
+                    linestyle="--", alpha=0.6,
+                    label=f"Best: {max(history['val_auroc']):.4f}")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("AUROC")
+        ax2.set_title(f"{label} Transformer — Validation AUROC")
+        ax2.legend()
+        ax2.grid(alpha=0.3)
+
+        plt.tight_layout()
+        fname = f"outputs/figures/training_curves_{label.lower()}.png"
+        plt.savefig(fname, dpi=150)
+        plt.close()
+        print(f"Saved {fname}")
+
+    # Combined AUROC comparison plot
+    if len(histories) == 2:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        colors = {"Default": "#4c9be8", "Tuned": "#e8754c"}
+        for label, history in histories.items():
+            epochs = range(1, len(history["val_auroc"]) + 1)
+            ax.plot(epochs, history["val_auroc"],
+                    label=f"{label} (best={max(history['val_auroc']):.4f})",
+                    color=colors[label])
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Val AUROC")
+        ax.set_title("Validation AUROC — Default vs Tuned Transformer")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        path = "outputs/figures/training_curves_comparison.png"
+        plt.savefig(path, dpi=150)
+        plt.close()
+        print(f"Saved {path}")
 
 
-# ── 4. ROC and Precision-Recall curves ────────────────────────────────────────
+# ── 4. ROC and Precision-Recall curves — all three models ─────────────────────
 
-def plot_roc_pr(model_path="outputs/transformer_best.pt",
-                d_model=64, n_heads=4, n_layers=2, d_ff=128, month_dim=5):
-    """Overlay ROC and PR curves for both models."""
+def plot_roc_pr(d_model=128, n_heads=8, n_layers=3, d_ff=128, month_dim=5):
+    """Overlay ROC and PR curves for all three models."""
     device = torch.device("cpu")
 
-    # ── Transformer probabilities ──────────────────────────────────────────────
-    model = TemporalTransformer(d_model=d_model, n_heads=n_heads,
-                                n_layers=n_layers, d_ff=d_ff, month_dim=month_dim)
-    state = torch.load(model_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.eval()
-
     _, _, test_loader, _, splits = get_dataloaders(batch_size=512)
-    _, _, _, _, _, y_te = splits
-
-    tf_logits, tf_labels = [], []
-    with torch.no_grad():
-        for demo, monthly, labels in test_loader:
-            logits, _ = model(demo, monthly)
-            tf_logits.append(torch.sigmoid(logits).numpy())
-            tf_labels.append(labels.numpy())
-    tf_probs  = np.concatenate(tf_logits)
-    labels_np = np.concatenate(tf_labels).astype(int)
-
-    # ── Random Forest probabilities ────────────────────────────────────────────
-    # Load the saved model directly — no refitting, no risk of silent divergence
-    # if the data pipeline changes between the RF training run and this plot.
-    import joblib
-    from data_loader import load_raw, clean, split_data
-
-    rf = joblib.load("outputs/rf_best.joblib")
-
     X, y = load_raw()
     X = clean(X)
     _, _, X_te, _, _, y_te = split_data(X, y)
-    rf_probs = rf.predict_proba(X_te.values)[:, 1]
+    labels_np = y_te.values.astype(int)
 
-    # ── Plot ───────────────────────────────────────────────────────────────────
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    model_probs = {}
 
-    for probs, name, color in [
-        (tf_probs,  "Transformer", "#4c9be8"),
-        (rf_probs,  "Random Forest", "#e8754c"),
-    ]:
+    # Default transformer
+    default_path = "outputs/transformer_best_default.pt"
+    if os.path.exists(default_path):
+        model_def = TemporalTransformer(d_model=64, n_heads=4,
+                                        n_layers=2, d_ff=128, month_dim=month_dim)
+        state = torch.load(default_path, map_location=device, weights_only=True)
+        model_def.load_state_dict(state)
+        model_def.eval()
+        logits_list = []
+        with torch.no_grad():
+            for demo, monthly, _ in test_loader:
+                logits, _ = model_def(demo, monthly)
+                logits_list.append(torch.sigmoid(logits).numpy())
+        model_probs["Default Transformer"] = np.concatenate(logits_list)
+
+    # Tuned transformer
+    tuned_path = "outputs/transformer_best_tuned.pt"
+    if os.path.exists(tuned_path):
+        model_tuned = TemporalTransformer(d_model=d_model, n_heads=n_heads,
+                                          n_layers=n_layers, d_ff=d_ff,
+                                          month_dim=month_dim)
+        state = torch.load(tuned_path, map_location=device, weights_only=True)
+        model_tuned.load_state_dict(state)
+        model_tuned.eval()
+        logits_list = []
+        with torch.no_grad():
+            for demo, monthly, _ in test_loader:
+                logits, _ = model_tuned(demo, monthly)
+                logits_list.append(torch.sigmoid(logits).numpy())
+        model_probs["Tuned Transformer"] = np.concatenate(logits_list)
+
+    # Random Forest
+    rf_path = "outputs/rf_best.joblib"
+    if os.path.exists(rf_path):
+        import joblib
+        rf = joblib.load(rf_path)
+        model_probs["Random Forest"] = rf.predict_proba(X_te.values)[:, 1]
+
+    if not model_probs:
+        print("No model files found. Run models first.")
+        return
+
+    # Plot
+    colors = {
+        "Default Transformer": "#4c9be8",
+        "Tuned Transformer":   "#e8754c",
+        "Random Forest":       "#50c8a0",
+    }
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    for name, probs in model_probs.items():
         fpr, tpr, _ = roc_curve(labels_np, probs)
         roc_auc     = auc(fpr, tpr)
-        ax1.plot(fpr, tpr, color=color, lw=2,
+        ax1.plot(fpr, tpr, color=colors[name], lw=2,
                  label=f"{name} (AUC={roc_auc:.4f})")
 
         prec, rec, _ = precision_recall_curve(labels_np, probs)
         pr_auc       = auc(rec, prec)
-        ax2.plot(rec, prec, color=color, lw=2,
+        ax2.plot(rec, prec, color=colors[name], lw=2,
                  label=f"{name} (AUC={pr_auc:.4f})")
 
     ax1.plot([0, 1], [0, 1], "k--", alpha=0.4, lw=1)
     ax1.set_xlabel("False Positive Rate")
     ax1.set_ylabel("True Positive Rate")
-    ax1.set_title("ROC Curve")
+    ax1.set_title("ROC Curve — All Models")
     ax1.legend(loc="lower right")
     ax1.grid(alpha=0.3)
 
@@ -290,7 +351,7 @@ def plot_roc_pr(model_path="outputs/transformer_best.pt",
                 label=f"Baseline (prevalence={baseline:.2f})")
     ax2.set_xlabel("Recall")
     ax2.set_ylabel("Precision")
-    ax2.set_title("Precision-Recall Curve")
+    ax2.set_title("Precision-Recall Curve — All Models")
     ax2.legend(loc="upper right")
     ax2.grid(alpha=0.3)
 
@@ -301,45 +362,60 @@ def plot_roc_pr(model_path="outputs/transformer_best.pt",
     print(f"Saved {path}")
 
 
-# ── 5. Model comparison ────────────────────────────────────────────────────────
+# ── 5. Model comparison — THREE models ────────────────────────────────────────
 
 def plot_comparison():
+    """
+    Compares Default Transformer, Tuned Transformer, and Random Forest
+    on Test AUROC and Test Accuracy (tuned threshold).
+    """
     results = {}
-    for name, fpath in [("Transformer", "outputs/transformer_results.json"),
-                         ("Random Forest", "outputs/rf_results.json")]:
+
+    for name, fpath in [
+        ("Default Transformer", "outputs/transformer_results_default.json"),
+        ("Tuned Transformer",   "outputs/transformer_results_tuned.json"),
+        ("Random Forest",       "outputs/rf_results.json"),
+    ]:
         if os.path.exists(fpath):
             with open(fpath) as f:
                 results[name] = json.load(f)
+        else:
+            print(f"Warning: {fpath} not found — skipping {name}")
 
     if len(results) < 2:
-        print("Run both models first to generate comparison plots.")
+        print("Need at least 2 model results to compare.")
         return
 
-    # Use tuned-threshold accuracy for transformer (stored as test_acc_tuned),
-    # fall back to test_acc if key absent (e.g. old result file).
+    # Use tuned-threshold accuracy for transformers
     for name in results:
         if "test_acc_tuned" in results[name]:
             results[name]["test_acc"] = results[name]["test_acc_tuned"]
 
-    metrics = ["test_acc", "test_auroc"]
-    labels  = ["Test Accuracy (tuned threshold)", "Test AUROC"]
-    x = np.arange(len(metrics))
-    w = 0.3
+    metrics = ["test_auroc", "test_acc"]
+    labels  = ["Test AUROC", "Test Accuracy (tuned threshold)"]
+    x       = np.arange(len(metrics))
+    w       = 0.25
+    colors  = ["#4c9be8", "#e8754c", "#50c8a0"]
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    n_models = len(results)
+    offsets  = np.linspace(-(n_models - 1) / 2, (n_models - 1) / 2, n_models) * w
+
     for i, (name, res) in enumerate(results.items()):
-        vals = [res[m] for m in metrics]
-        bars = ax.bar(x + (i - 0.5) * w, vals, w, label=name,
-                      color=["#4c9be8", "#e8754c"][i], edgecolor="white")
+        vals = [res.get(m, 0) for m in metrics]
+        bars = ax.bar(x + offsets[i], vals, w, label=name,
+                      color=colors[i], edgecolor="white")
         for bar, v in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.003,
-                    f"{v:.4f}", ha="center", va="bottom", fontsize=9)
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.003,
+                    f"{v:.4f}", ha="center", va="bottom", fontsize=8)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylim(0, 1.0)
     ax.set_ylabel("Score")
-    ax.set_title("Model Comparison — Test Set")
+    ax.set_title("Model Comparison — Test Set (Three Models)")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
@@ -349,13 +425,22 @@ def plot_comparison():
     print(f"Saved {path}")
 
     # Print comparison table
-    print("\n── Model Comparison ──────────────────────────────")
-    print(f"{'Metric':<20} {'Transformer':>14} {'Random Forest':>15}")
-    print("-" * 52)
+    print("\n── Model Comparison ──────────────────────────────────────────")
+    print(f"{'Metric':<35} {'Default TF':>12} {'Tuned TF':>10} {'Random Forest':>15}")
+    print("-" * 75)
     for m, label in zip(metrics, labels):
-        tf  = results.get("Transformer", {}).get(m, float("nan"))
-        rf  = results.get("Random Forest", {}).get(m, float("nan"))
-        print(f"{label:<20} {tf:>14.4f} {rf:>15.4f}")
+        vals = [results.get(name, {}).get(m, float("nan"))
+                for name in ["Default Transformer", "Tuned Transformer", "Random Forest"]]
+        print(f"{label:<35} {vals[0]:>12.4f} {vals[1]:>10.4f} {vals[2]:>15.4f}")
+
+    # Also print n_params for transformers
+    print("\n── Model Size ────────────────────────────────────────────────")
+    for name in ["Default Transformer", "Tuned Transformer"]:
+        if name in results and "n_params" in results[name]:
+            print(f"  {name}: {results[name]['n_params']:,} parameters")
+    if "Random Forest" in results and "best_params" in results["Random Forest"]:
+        n_trees = results["Random Forest"]["best_params"].get("n_estimators", "?")
+        print(f"  Random Forest: {n_trees} trees")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -364,9 +449,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--mode", default="all",
                    choices=["all", "eda", "attention", "curves", "roc_pr", "compare"])
-    p.add_argument("--d_model",   type=int, default=64)
-    p.add_argument("--n_heads",   type=int, default=4)
-    p.add_argument("--n_layers",  type=int, default=2)
+    p.add_argument("--d_model",   type=int, default=128)
+    p.add_argument("--n_heads",   type=int, default=8)
+    p.add_argument("--n_layers",  type=int, default=3)
     p.add_argument("--d_ff",      type=int, default=128)
     p.add_argument("--month_dim", type=int, default=5)
     return p.parse_args()
@@ -383,25 +468,19 @@ if __name__ == "__main__":
         plot_eda()
 
     if mode in ("all", "curves"):
-        if os.path.exists("outputs/transformer_history.json"):
-            print("\n=== Training curves ===")
-            plot_curves()
-        else:
-            print("No transformer history found; run train_transformer.py first.")
+        print("\n=== Training curves ===")
+        plot_curves()
 
     if mode in ("all", "attention"):
-        if os.path.exists("outputs/transformer_best.pt"):
+        if os.path.exists("outputs/transformer_best_tuned.pt"):
             print("\n=== Attention heatmaps ===")
             plot_attention(**kw)
         else:
-            print("No transformer checkpoint found; run train_transformer.py first.")
+            print("No tuned transformer checkpoint found.")
 
     if mode in ("all", "roc_pr"):
-        if os.path.exists("outputs/transformer_best.pt") and os.path.exists("outputs/rf_results.json"):
-            print("\n=== ROC and PR curves ===")
-            plot_roc_pr(**kw)
-        else:
-            print("Run both models first.")
+        print("\n=== ROC and PR curves ===")
+        plot_roc_pr(**kw)
 
     if mode in ("all", "compare"):
         print("\n=== Model comparison ===")
