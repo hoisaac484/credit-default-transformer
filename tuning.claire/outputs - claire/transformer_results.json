@@ -1,0 +1,24 @@
+{
+  "test_loss": 0.9214276126225789,
+  "test_acc": 0.6403333333333333,
+  "test_acc_tuned": 0.7873333333333333,
+  "test_auroc": 0.766996400614161,
+  "best_val_auroc": 0.7896846375226936,
+  "best_threshold": 0.64,
+  "n_params": 102721,
+  "args": {
+    "d_model": 64,
+    "n_heads": 8,
+    "n_layers": 3,
+    "d_ff": 128,
+    "dropout": 0.2,
+    "lr": 0.001,
+    "wd": 0.0005,
+    "batch_size": 128,
+    "epochs": 60,
+    "patience": 12,
+    "warmup_epochs": 3,
+    "seed": 42,
+    "label_smoothing": 0.1
+  }
+}

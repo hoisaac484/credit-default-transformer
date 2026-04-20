@@ -1,0 +1,23 @@
+{
+  "test_loss": 0.920943299293518,
+  "test_acc": 0.6266666666666667,
+  "test_acc_tuned": 0.7753333333333333,
+  "test_auroc": 0.7701333586329434,
+  "best_threshold": 0.62,
+  "n_params": 102721,
+  "n_train": 27000,
+  "hp": {
+    "d_model": 64,
+    "n_heads": 8,
+    "n_layers": 3,
+    "d_ff": 128,
+    "dropout": 0.2,
+    "lr": 0.001,
+    "weight_decay": 0.0005,
+    "batch_size": 128,
+    "label_smoothing": 0.1,
+    "warmup_epochs": 3,
+    "fixed_epochs": 17,
+    "seed": 42
+  }
+}
