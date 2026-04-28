@@ -1,9 +1,8 @@
 """
 Data loading and preprocessing for the UCI Credit Card Default dataset.
-Downloads via ucimlrepo and returns train/val/test splits.
+Downloads via ucimlrepo and returns 70/15/15 train/val/test splits.
 """
 
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -12,206 +11,173 @@ from torch.utils.data import Dataset, DataLoader
 
 
 # ── Feature groups ─────────────────────────────────────────────────────────────
-DEMO_COLS = ["LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE"]
+STATIC_COLS = ["LIMIT_BAL", "SEX", "EDUCATION", "MARRIAGE", "AGE"]
 
-# Monthly columns ordered Sep→Apr (most-recent first, matching PAY_0..PAY_6)
-PAY_COLS   = ["PAY_0",  "PAY_2",  "PAY_3",  "PAY_4",  "PAY_5",  "PAY_6"]
-BILL_COLS  = ["BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6"]
-AMT_COLS   = ["PAY_AMT1",  "PAY_AMT2",  "PAY_AMT3",  "PAY_AMT4",  "PAY_AMT5",  "PAY_AMT6"]
-N_MONTHS    = 6   # Sep, Aug, Jul, Jun, May, Apr 2005
-MONTH_DIM   = 5   # PAY_t, BILL_AMT_t, PAY_AMT_t, util_ratio_t, pay_ratio_t
-TARGET_COL  = "default payment next month"
+# Monthly columns ordered oldest→most recent (Apr→Sep)
+PAY_COLS  = ["PAY_6",     "PAY_5",     "PAY_4",     "PAY_3",     "PAY_2",     "PAY_0"]
+BILL_COLS = ["BILL_AMT6", "BILL_AMT5", "BILL_AMT4", "BILL_AMT3", "BILL_AMT2", "BILL_AMT1"]
+AMT_COLS  = ["PAY_AMT6",  "PAY_AMT5",  "PAY_AMT4",  "PAY_AMT3",  "PAY_AMT2",  "PAY_AMT1"]
+
+TARGET_COL = "default"
+
+# PAY_COLS excluded from scaler — they are ordinal ints used as embedding indices
+NUMERIC_STATIC_COLS  = ["LIMIT_BAL", "AGE"]
+MONTHLY_NUMERIC_COLS = BILL_COLS + AMT_COLS
 
 
-def load_raw() -> tuple[pd.DataFrame, pd.Series]:
-    """Fetch from UCI repo (cached after first call by ucimlrepo)."""
+def load_and_clean() -> pd.DataFrame:
+    """Fetch from UCI repo and apply light cleaning."""
     try:
         from ucimlrepo import fetch_ucirepo
-        ds = fetch_ucirepo(id=350)
-        X = ds.data.features.copy()
-        y = ds.data.targets.iloc[:, 0].copy()
+        dataset = fetch_ucirepo(id=350)
+        X = dataset.data.features
+        y = dataset.data.targets
+        df = pd.concat([X, y], axis=1)
+        df.columns = dataset.variables["description"].tolist()[1:]
     except Exception as e:
         raise RuntimeError(
             "Could not fetch dataset. Install ucimlrepo: pip install ucimlrepo\n"
             f"Original error: {e}"
         )
 
-    # ucimlrepo returns generic names X1-X23; rename to descriptive names
-    col_map = {
-        "X1":  "LIMIT_BAL",
-        "X2":  "SEX",
-        "X3":  "EDUCATION",
-        "X4":  "MARRIAGE",
-        "X5":  "AGE",
-        "X6":  "PAY_0",
-        "X7":  "PAY_2",
-        "X8":  "PAY_3",
-        "X9":  "PAY_4",
-        "X10": "PAY_5",
-        "X11": "PAY_6",
-        "X12": "BILL_AMT1",
-        "X13": "BILL_AMT2",
-        "X14": "BILL_AMT3",
-        "X15": "BILL_AMT4",
-        "X16": "BILL_AMT5",
-        "X17": "BILL_AMT6",
-        "X18": "PAY_AMT1",
-        "X19": "PAY_AMT2",
-        "X20": "PAY_AMT3",
-        "X21": "PAY_AMT4",
-        "X22": "PAY_AMT5",
-        "X23": "PAY_AMT6",
-    }
-    X = X.rename(columns=col_map)
-    y = y.rename("default")
-    return X, y
+    df = df.rename(columns={"default payment next month": "default"})
+
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Remap undocumented EDUCATION categories (0, 5, 6 → 4 "Others") and
+    # MARRIAGE category 0 → 3 "Others" so indices are contiguous and meaningful
+    df["EDUCATION"] = df["EDUCATION"].replace({0: 4, 5: 4, 6: 4})
+    df["MARRIAGE"]  = df["MARRIAGE"].replace({0: 3})
+
+    df = df.reset_index(drop=True)
+    return df
 
 
-def clean(X: pd.DataFrame) -> pd.DataFrame:
-    """
-    Light cleaning:
-    - EDUCATION has undocumented values 0,5,6 → recode to 4 (other)
-    - MARRIAGE has undocumented value 0 → recode to 3 (other)
-    """
-    X = X.copy()
-    X["EDUCATION"] = X["EDUCATION"].replace({0: 4, 5: 4, 6: 4})
-    X["MARRIAGE"]  = X["MARRIAGE"].replace({0: 3})
-    return X
-
-
-def split_data(X: pd.DataFrame, y: pd.Series, seed: int = 42):
-    """80/10/10 stratified split."""
-    X_tr, X_tmp, y_tr, y_tmp = train_test_split(
-        X, y, test_size=0.2, random_state=seed, stratify=y
+def split_and_scale(df: pd.DataFrame, seed: int = 42):
+    """70/15/15 stratified split + StandardScaler on numeric columns only."""
+    train_df, temp_df = train_test_split(
+        df, test_size=0.30, random_state=seed, stratify=df[TARGET_COL]
     )
-    X_val, X_te, y_val, y_te = train_test_split(
-        X_tmp, y_tmp, test_size=0.5, random_state=seed, stratify=y_tmp
+    val_df, test_df = train_test_split(
+        temp_df, test_size=0.50, random_state=seed, stratify=temp_df[TARGET_COL]
     )
-    return X_tr, X_val, X_te, y_tr, y_val, y_te
+
+    train_df = train_df.copy()
+    val_df   = val_df.copy()
+    test_df  = test_df.copy()
+
+    scaler_static  = StandardScaler()
+    scaler_monthly = StandardScaler()
+
+    train_df[NUMERIC_STATIC_COLS]  = scaler_static.fit_transform(train_df[NUMERIC_STATIC_COLS])
+    val_df[NUMERIC_STATIC_COLS]    = scaler_static.transform(val_df[NUMERIC_STATIC_COLS])
+    test_df[NUMERIC_STATIC_COLS]   = scaler_static.transform(test_df[NUMERIC_STATIC_COLS])
+
+    train_df[MONTHLY_NUMERIC_COLS] = scaler_monthly.fit_transform(train_df[MONTHLY_NUMERIC_COLS])
+    val_df[MONTHLY_NUMERIC_COLS]   = scaler_monthly.transform(val_df[MONTHLY_NUMERIC_COLS])
+    test_df[MONTHLY_NUMERIC_COLS]  = scaler_monthly.transform(test_df[MONTHLY_NUMERIC_COLS])
+
+    return train_df, val_df, test_df, scaler_static, scaler_monthly
 
 
-class CreditCardDataset(Dataset):
+class CreditDataset(Dataset):
     """
-    Returns two tensors per sample that the model concatenates into a length-8 sequence:
+    Returns (X_dict, target) per sample.
 
-      [CLS]      : learnable token added by the model itself (not stored here)
-      Token 0    : demographics [LIMIT_BAL, SEX, EDUCATION, MARRIAGE, AGE]  → dim 5
-      Tokens 1–6 : monthly     [PAY_t, BILL_AMT_t, PAY_AMT_t,
-                                 util_ratio_t, pay_ratio_t]                  → dim 5
-
-    util_ratio_t = BILL_AMT_t / LIMIT_BAL  (credit utilisation, clipped to [-1, 3])
-    pay_ratio_t  = PAY_AMT_t  / BILL_AMT_t when bill > 0, else 0 (clipped to [0, 5])
-
-    All values are standardised (scalers fitted on training set only).
-    Scalers are stored so they can be applied to val/test without leakage.
+    X_dict keys:
+      static_num  : (2,)   float32  — scaled LIMIT_BAL, AGE
+      static_cat  : (3,)   long     — SEX, EDUCATION, MARRIAGE (embedding indices)
+      monthly_num : (6, 2) float32  — scaled BILL_AMT, PAY_AMT per month
+      monthly_pay : (6,)   long     — PAY status clamped to [0, 15] (embedding index)
     """
 
-    def __init__(self, X: pd.DataFrame, y: pd.Series,
-                 demo_scaler: StandardScaler | None = None,
-                 monthly_scaler: StandardScaler | None = None,
-                 fit_scalers: bool = False):
-
-        X = X.reset_index(drop=True)
-        y = y.reset_index(drop=True)
-
-        # ── Demographics ──────────────────────────────────────────────────────
-        demo_raw = X[DEMO_COLS].values.astype(np.float32)
-        if fit_scalers:
-            self.demo_scaler = StandardScaler()
-            demo_scaled = self.demo_scaler.fit_transform(demo_raw)
+    def __init__(self, X, y=None):
+        if hasattr(X, "reset_index"):
+            self.X = X.reset_index(drop=True)
         else:
-            self.demo_scaler = demo_scaler
-            demo_scaled = demo_scaler.transform(demo_raw)
-
-        # ── Monthly tokens ────────────────────────────────────────────────────
-        limit = X["LIMIT_BAL"].values.astype(np.float32)   # (N,)
-
-        # Engineered features per month
-        bill  = X[BILL_COLS].values.astype(np.float32)     # (N, 6)
-        amt   = X[AMT_COLS].values.astype(np.float32)      # (N, 6)
-
-        # Utilisation: bill / limit — clip to [-1, 3] to handle credit balances & overlimit
-        util  = bill / (limit[:, np.newaxis] + 1)
-        util  = np.clip(util, -1.0, 3.0)
-
-        # Payment ratio: fraction of (positive) bill paid; 0 when no bill outstanding
-        bill_pos = np.where(bill > 0, bill, np.nan)
-        payr     = np.where(bill > 0, amt / bill_pos, 0.0)
-        payr     = np.clip(payr, 0.0, 5.0)                  # cap at 5× (full payoff + credit)
-
-        # Stack into (N, 6, 5): axis-2 = [PAY, BILL, AMT, util, pay_ratio]
-        monthly_raw = np.stack([
-            X[PAY_COLS].values.astype(np.float32),
-            bill,
-            amt,
-            util,
-            payr,
-        ], axis=2)                                          # (N, 6, 5)
-
-        N = monthly_raw.shape[0]
-        monthly_flat = monthly_raw.reshape(N, -1)           # (N, 30)
-
-        if fit_scalers:
-            self.monthly_scaler = StandardScaler()
-            monthly_flat_scaled = self.monthly_scaler.fit_transform(monthly_flat)
-        else:
-            self.monthly_scaler = monthly_scaler
-            monthly_flat_scaled = monthly_scaler.transform(monthly_flat)
-
-        monthly_scaled = monthly_flat_scaled.reshape(N, N_MONTHS, MONTH_DIM)  # (N,6,5)
-
-        # ── Assemble token sequence ───────────────────────────────────────────
-        # Token 0: demographics → (N, 1, 5)
-        demo_tok = demo_scaled[:, np.newaxis, :]           # (N, 1, 5)
-        # Tokens 1-6: monthly snapshots → (N, 6, 5)
-        # Stored separately; the model projects each type independently then concatenates.
-        self.demo_tokens    = torch.from_numpy(demo_tok)       # (N, 1, 5)
-        self.monthly_tokens = torch.from_numpy(monthly_scaled) # (N, 6, 5)
-        self.labels         = torch.tensor(y.values, dtype=torch.float32)
+            self.X = X
+        self.y = y
 
     def __len__(self):
-        return len(self.labels)
+        return len(self.X)
 
     def __getitem__(self, idx):
-        return (
-            self.demo_tokens[idx],     # (1, 5)
-            self.monthly_tokens[idx],  # (6, 5)
-            self.labels[idx],          # scalar
+        row = self.X.iloc[idx] if hasattr(self.X, "iloc") else self.X[idx]
+
+        static_num = torch.tensor(
+            [row["LIMIT_BAL"], row["AGE"]],
+            dtype=torch.float32,
         )
 
+        static_cat = torch.tensor(
+            [int(row["SEX"]), int(row["EDUCATION"]), int(row["MARRIAGE"])],
+            dtype=torch.long,
+        )
 
-def get_dataloaders(batch_size: int = 256, seed: int = 42, num_workers: int = 0):
+        monthly_num = []
+        monthly_pay = []
+        for p, b, a in zip(PAY_COLS, BILL_COLS, AMT_COLS):
+            monthly_num.append([row[b], row[a]])
+            monthly_pay.append(max(0, min(15, int(row[p]) + 2)))  # clamp to valid embedding range
+
+        monthly_num = torch.tensor(monthly_num, dtype=torch.float32)   # (6, 2)
+        monthly_pay = torch.tensor(monthly_pay, dtype=torch.long)      # (6,)
+
+        X_dict = {
+            "static_num":  static_num,
+            "static_cat":  static_cat,
+            "monthly_num": monthly_num,
+            "monthly_pay": monthly_pay,
+        }
+
+        if self.y is not None:
+            val = self.y.iloc[idx] if hasattr(self.y, "iloc") else self.y[idx]
+            target = torch.tensor(float(val), dtype=torch.float32)
+        else:
+            target = torch.tensor(0.0, dtype=torch.float32)
+
+        return X_dict, target
+
+
+def get_dataloaders(batch_size: int = 128, seed: int = 42, num_workers: int = 0):
     """End-to-end: fetch → clean → split → scale → DataLoader."""
-    X, y = load_raw()
-    X    = clean(X)
+    df = load_and_clean()
+    train_df, val_df, test_df, scaler_static, scaler_monthly = split_and_scale(df, seed)
 
-    X_tr, X_val, X_te, y_tr, y_val, y_te = split_data(X, y, seed)
+    X_train = train_df.drop(columns=[TARGET_COL])
+    y_train = train_df[TARGET_COL]
+    X_val   = val_df.drop(columns=[TARGET_COL])
+    y_val   = val_df[TARGET_COL]
+    X_test  = test_df.drop(columns=[TARGET_COL])
+    y_test  = test_df[TARGET_COL]
 
-    train_ds = CreditCardDataset(X_tr, y_tr, fit_scalers=True)
-    val_ds   = CreditCardDataset(X_val, y_val,
-                                  demo_scaler=train_ds.demo_scaler,
-                                  monthly_scaler=train_ds.monthly_scaler)
-    test_ds  = CreditCardDataset(X_te, y_te,
-                                  demo_scaler=train_ds.demo_scaler,
-                                  monthly_scaler=train_ds.monthly_scaler)
+    train_dataset = CreditDataset(X_train, y_train)
+    val_dataset   = CreditDataset(X_val,   y_val)
+    test_dataset  = CreditDataset(X_test,  y_test)
 
     kw = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=False)
-    train_loader = DataLoader(train_ds, shuffle=True,  **kw)
-    val_loader   = DataLoader(val_ds,   shuffle=False, **kw)
-    test_loader  = DataLoader(test_ds,  shuffle=False, **kw)
+    train_loader = DataLoader(train_dataset, shuffle=True,  **kw)
+    val_loader   = DataLoader(val_dataset,   shuffle=False, **kw)
+    test_loader  = DataLoader(test_dataset,  shuffle=False, **kw)
 
-    # Positive class weight for imbalanced BCE loss
-    n_neg = int((y_tr == 0).sum())
-    n_pos = int((y_tr == 1).sum())
-    pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32)
-
-    return train_loader, val_loader, test_loader, pos_weight, (X_tr, X_val, X_te, y_tr, y_val, y_te)
+    return (
+        train_loader, val_loader, test_loader,
+        train_dataset, val_dataset, test_dataset,
+        X_train, X_val, X_test, y_train, y_val, y_test,
+        scaler_static, scaler_monthly,
+    )
 
 
 if __name__ == "__main__":
-    tr, val, te, pw, _ = get_dataloaders()
-    demo, monthly, labels = next(iter(tr))
-    print("demo shape   :", demo.shape)      # (B, 1, 5)
-    print("monthly shape:", monthly.shape)   # (B, 6, 5)
-    print("labels shape :", labels.shape)    # (B,)
-    print("pos_weight   :", pw.item())
+    result = get_dataloaders()
+    train_loader, val_loader, test_loader = result[0], result[1], result[2]
+    train_dataset, val_dataset, test_dataset = result[3], result[4], result[5]
+
+    batch = next(iter(train_loader))
+    inputs_dict, targets = batch
+    for k, v in inputs_dict.items():
+        print(f"{k:12} : {v.shape}")
+    print(f"{'target':12} : {targets.shape}")
+
+    print(f"\nTrain: {len(train_dataset):,}  Val: {len(val_dataset):,}  Test: {len(test_dataset):,}")
